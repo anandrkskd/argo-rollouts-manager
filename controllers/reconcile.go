@@ -53,7 +53,7 @@ func (r *RolloutManagerReconciler) reconcileRolloutsManager(ctx context.Context,
 	}
 
 	var pullSecretRefs []corev1.LocalObjectReference
-	if !r.IsOpenShiftCluster {
+	if !r.IsOpenShiftCluster && r.OperatorNamespace != "" {
 		log.Info("reconciling RolloutsManager ImagePullSecret")
 		var psErr error
 		pullSecretRefs, psErr = r.reconcileRolloutsManagerImagePullSecret(ctx, cr)

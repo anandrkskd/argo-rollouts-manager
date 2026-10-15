@@ -3,6 +3,7 @@ package rollouts
 import (
 	"context"
 	"fmt"
+	"maps"
 	"reflect"
 	"sort"
 
@@ -65,7 +66,8 @@ func (r *RolloutManagerReconciler) reconcileRolloutsServiceAccount(ctx context.C
 		if desired == nil {
 			desired = []corev1.LocalObjectReference{}
 		}
-		existing := append([]corev1.LocalObjectReference(nil), liveServiceAccount.ImagePullSecrets...)
+		existing := make([]corev1.LocalObjectReference, len(liveServiceAccount.ImagePullSecrets))
+		copy(existing, liveServiceAccount.ImagePullSecrets)
 		sort.Slice(existing, func(i, j int) bool { return existing[i].Name < existing[j].Name })
 		if !reflect.DeepEqual(existing, desired) {
 			liveServiceAccount.ImagePullSecrets = desired
@@ -1480,15 +1482,22 @@ func (r *RolloutManagerReconciler) reconcileRolloutsManagerImagePullSecret(ctx c
 	desiredNames := make(map[string]bool)
 	var refs []corev1.LocalObjectReference
 
-	for i := range sourceSecrets.Items {
-		src := &sourceSecrets.Items[i]
+	if len(sourceSecrets.Items) > 1 {
+		// More than one labeled secret is ambiguous — remove all propagated copies and clear SA refs.
+		// This matches the openshift-gitops operator behavior.
+		log.Info("multiple image pull secrets with propagation label found; removing all propagated copies until only one remains",
+			"operatorNamespace", operatorNS, "count", len(sourceSecrets.Items))
+		// desiredNames stays empty → cleanup block below deletes all existing copies.
+	} else {
+		for i := range sourceSecrets.Items {
+			src := &sourceSecrets.Items[i]
 
-		if operatorNS == cr.Namespace {
-			// Same namespace: use directly, no copy needed.
-			desiredNames[src.Name] = true
-			refs = append(refs, corev1.LocalObjectReference{Name: src.Name})
-			continue
-		}
+			if operatorNS == cr.Namespace {
+				// Same namespace: use directly, no copy needed.
+				desiredNames[src.Name] = true
+				refs = append(refs, corev1.LocalObjectReference{Name: src.Name})
+				continue
+			}
 
 		existing := &corev1.Secret{}
 		err := r.Get(ctx, client.ObjectKey{Name: src.Name, Namespace: cr.Namespace}, existing)
@@ -1504,7 +1513,7 @@ func (r *RolloutManagerReconciler) reconcileRolloutsManagerImagePullSecret(ctx c
 				ObjectMeta: metav1.ObjectMeta{
 					Name:        src.Name,
 					Namespace:   cr.Namespace,
-					Annotations: src.Annotations,
+					Annotations: maps.Clone(src.Annotations),
 					Labels: map[string]string{
 						RolloutManagerImagePullSecretCopiedLabel: src.Name,
 					},
@@ -1545,8 +1554,10 @@ func (r *RolloutManagerReconciler) reconcileRolloutsManagerImagePullSecret(ctx c
 		desiredNames[src.Name] = true
 		refs = append(refs, corev1.LocalObjectReference{Name: src.Name})
 	}
+	} // end of len == 1 else block
 
-	// Cleanup: delete operator-managed copies whose source secret no longer has the label.
+	// Cleanup: delete operator-managed copies whose source secret no longer has the label,
+	// or all copies when more than one labeled secret was found.
 	if operatorNS != cr.Namespace {
 		existingCopies := &corev1.SecretList{}
 		if err := r.List(ctx, existingCopies,

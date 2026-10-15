@@ -172,8 +172,8 @@ var _ = Describe("Argo RolloutManager ImagePullSecret E2E tests", func() {
 			}
 		})
 
-		It("should propagate multiple labeled pull secrets to the SA", func() {
-			By("creating two pull secrets with the propagate label")
+		It("should not propagate when multiple secrets have the propagation label (ambiguous)", func() {
+			By("creating two pull secrets with the propagate label in the operator namespace")
 			for _, name := range []string{"pull-secret-a", "pull-secret-b"} {
 				Expect(k8sClient.Create(ctx, &corev1.Secret{
 					ObjectMeta: metav1.ObjectMeta{
@@ -203,15 +203,33 @@ var _ = Describe("Argo RolloutManager ImagePullSecret E2E tests", func() {
 			Expect(k8sClient.Create(ctx, &rolloutManager)).To(Succeed())
 			Eventually(rolloutManager, "60s", "1s").Should(rolloutManagerFixture.HavePhase(v1alpha1.PhaseAvailable))
 
-			By("verifying the SA has both pull secrets")
+			By("verifying SA has no imagePullSecrets (ambiguous state, operator skips propagation)")
 			sa := &corev1.ServiceAccount{}
+			Consistently(func() []corev1.LocalObjectReference {
+				_ = k8sClient.Get(ctx, client.ObjectKey{Name: controllers.DefaultArgoRolloutsResourceName, Namespace: rmNamespace}, sa)
+				return sa.ImagePullSecrets
+			}, "10s", "2s").Should(BeEmpty())
+
+			if operatorNS != rmNamespace {
+				By("verifying no copies were created in the RM namespace")
+				for _, name := range []string{"pull-secret-a", "pull-secret-b"} {
+					s := &corev1.Secret{}
+					err := k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: rmNamespace}, s)
+					Expect(apierrors.IsNotFound(err)).To(BeTrue(), "expected secret %s not to exist in RM namespace", name)
+				}
+			}
+
+			By("removing one label so only one secret remains labeled")
+			secretA := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "pull-secret-a", Namespace: operatorNS}, secretA)).To(Succeed())
+			delete(secretA.Labels, controllers.RolloutManagerImagePullSecretPropagateLabel)
+			Expect(k8sClient.Update(ctx, secretA)).To(Succeed())
+
+			By("verifying SA now has the remaining pull secret")
 			Eventually(func() []corev1.LocalObjectReference {
 				_ = k8sClient.Get(ctx, client.ObjectKey{Name: controllers.DefaultArgoRolloutsResourceName, Namespace: rmNamespace}, sa)
 				return sa.ImagePullSecrets
-			}, "15s", "1s").Should(And(
-				ContainElement(corev1.LocalObjectReference{Name: "pull-secret-a"}),
-				ContainElement(corev1.LocalObjectReference{Name: "pull-secret-b"}),
-			))
+			}, "15s", "1s").Should(ConsistOf(corev1.LocalObjectReference{Name: "pull-secret-b"}))
 		})
 
 		It("should not propagate pull secrets when running on OpenShift", func() {
