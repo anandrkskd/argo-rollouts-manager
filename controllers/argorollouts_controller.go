@@ -336,9 +336,6 @@ func (r *RolloutManagerReconciler) enqueueAllRolloutManagers(ctx context.Context
 
 }
 
-// doesCRDExist checks if a CRD is present in the cluster, by using the discovery client.
-//
-// NOTE: this function should only be called from SetupWithManager. There are more efficient methods to determine this, elsewhere.
 // doesCRDExist checks whether a given API group/version is available on the cluster.
 // If resourceName is non-empty, it further checks that a specific resource exists within that group.
 //

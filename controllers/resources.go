@@ -1499,61 +1499,61 @@ func (r *RolloutManagerReconciler) reconcileRolloutsManagerImagePullSecret(ctx c
 				continue
 			}
 
-		existing := &corev1.Secret{}
-		err := r.Get(ctx, client.ObjectKey{Name: src.Name, Namespace: cr.Namespace}, existing)
-		if err != nil {
-			if !apierrors.IsNotFound(err) {
-				return nil, fmt.Errorf("failed to get secret %s in namespace %s: %w", src.Name, cr.Namespace, err)
-			}
+			existing := &corev1.Secret{}
+			err := r.Get(ctx, client.ObjectKey{Name: src.Name, Namespace: cr.Namespace}, existing)
+			if err != nil {
+				if !apierrors.IsNotFound(err) {
+					return nil, fmt.Errorf("failed to get secret %s in namespace %s: %w", src.Name, cr.Namespace, err)
+				}
 
-			log.V(1).Info("copying image pull secret to rollouts namespace",
-				"secret", src.Name, "from", operatorNS, "to", cr.Namespace)
+				log.V(1).Info("copying image pull secret to rollouts namespace",
+					"secret", src.Name, "from", operatorNS, "to", cr.Namespace)
 
-			dst := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:        src.Name,
-					Namespace:   cr.Namespace,
-					Annotations: maps.Clone(src.Annotations),
-					Labels: map[string]string{
-						RolloutManagerImagePullSecretCopiedLabel: src.Name,
+				dst := &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        src.Name,
+						Namespace:   cr.Namespace,
+						Annotations: maps.Clone(src.Annotations),
+						Labels: map[string]string{
+							RolloutManagerImagePullSecretCopiedLabel: src.Name,
+						},
 					},
-				},
-				Type: src.Type,
-				Data: src.Data,
+					Type: src.Type,
+					Data: src.Data,
+				}
+
+				if err := controllerutil.SetControllerReference(&cr, dst, r.Scheme); err != nil {
+					return nil, fmt.Errorf("failed to set owner on copied secret %s: %w", src.Name, err)
+				}
+
+				log.Info("Creating a new Secret instance",
+					"Namespace", dst.Namespace, "Name", dst.Name)
+				if err := r.Create(ctx, dst); err != nil {
+					return nil, fmt.Errorf("failed to create copied secret %s: %w", src.Name, err)
+				}
+				desiredNames[src.Name] = true
+				refs = append(refs, corev1.LocalObjectReference{Name: src.Name})
+				continue
 			}
 
-			if err := controllerutil.SetControllerReference(&cr, dst, r.Scheme); err != nil {
-				return nil, fmt.Errorf("failed to set owner on copied secret %s: %w", src.Name, err)
+			if existing.Labels[RolloutManagerImagePullSecretCopiedLabel] != src.Name || !metav1.IsControlledBy(existing, &cr) {
+				log.Info("secret with same name already exists and is not managed by this RolloutManager, skipping",
+					"secret", src.Name, "namespace", cr.Namespace)
+				continue // conflict: do not add to desiredNames or refs
 			}
 
-			log.Info("Creating a new Secret instance",
-				"Namespace", dst.Namespace, "Name", dst.Name)
-			if err := r.Create(ctx, dst); err != nil {
-				return nil, fmt.Errorf("failed to create copied secret %s: %w", src.Name, err)
+			if !reflect.DeepEqual(existing.Data, src.Data) || existing.Type != src.Type {
+				existing.Data = src.Data
+				existing.Type = src.Type
+				log.Info("image pull secret data changed",
+					"Namespace", existing.Namespace, "Name", existing.Name)
+				if err := r.Update(ctx, existing); err != nil {
+					return nil, fmt.Errorf("failed to update copied secret %s: %w", src.Name, err)
+				}
 			}
 			desiredNames[src.Name] = true
 			refs = append(refs, corev1.LocalObjectReference{Name: src.Name})
-			continue
 		}
-
-		if existing.Labels[RolloutManagerImagePullSecretCopiedLabel] != src.Name || !metav1.IsControlledBy(existing, &cr) {
-			log.Info("secret with same name already exists and is not managed by this RolloutManager, skipping",
-				"secret", src.Name, "namespace", cr.Namespace)
-			continue // conflict: do not add to desiredNames or refs
-		}
-
-		if !reflect.DeepEqual(existing.Data, src.Data) || existing.Type != src.Type {
-			existing.Data = src.Data
-			existing.Type = src.Type
-			log.Info("image pull secret data changed",
-				"Namespace", existing.Namespace, "Name", existing.Name)
-			if err := r.Update(ctx, existing); err != nil {
-				return nil, fmt.Errorf("failed to update copied secret %s: %w", src.Name, err)
-			}
-		}
-		desiredNames[src.Name] = true
-		refs = append(refs, corev1.LocalObjectReference{Name: src.Name})
-	}
 	} // end of len == 1 else block
 
 	// Cleanup: delete operator-managed copies whose source secret no longer has the label,
